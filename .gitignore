@@ -1,0 +1,11 @@
+# Local secrets (Wi-Fi, PC IP)
+**/wifi_config.h
+
+.env
+.env.*
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

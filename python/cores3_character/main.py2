@@ -1,0 +1,104 @@
+import socket
+import cv2
+import time
+import threading
+
+# --- 設定 ---
+UDP_IP = "0.0.0.0"  # 全てのネットワークからの受信を許可
+UDP_PORT = 50007
+
+# 表示レベルが変化したら動画を切り替える
+current_group_level = 1
+
+def udp_listener():
+    """ Wi-FiからCoreS3のデータを受信するスレッド """
+    global current_group_level
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # ソケットをバインドする際、すでに使用中なら再利用できるようにする
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((UDP_IP, UDP_PORT))
+    print(f"[受信待機中] ポート {UDP_PORT} でデータを受信しています...")
+
+    # 複数人データ保持用 { IPアドレス: (最終レベル, 受信時刻) }
+    user_states = {}
+
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            level = int(data.decode('utf-8').strip())
+            user_states[addr[0]] = (level, time.time())
+            print(f"受信 [{addr[0]}]: レベル {level}")
+
+            # --- 集計ロジック（最大値/ワースト採用） ---
+            now = time.time()
+            valid_levels = [lvl for ip, (lvl, last_seen) in user_states.items() if now - last_seen < 60]
+
+            if valid_levels:
+                current_group_level = max(valid_levels)
+                print(f"→ グループ全体レベル: {current_group_level} (参加人数: {len(valid_levels)}人)")
+
+        except (ValueError, OSError):
+            pass
+
+# 受信スレッドを開始
+listener_thread = threading.Thread(target=udp_listener, daemon=True)
+listener_thread.start()
+
+# --- 動画再生メインループ ---
+active_level = -1
+cap = None
+DISPLAY_WIDTH = 480  # ★画面の横幅を480ピクセルに縮小（ここでお好みのサイズに調整可能）
+
+print("キャラクター画面を表示します。終了するには画面を選択して 'q' キーを押してください。")
+print("※テスト機能: キーボードの '0'～'5' キーで表情を強制的に変更できます。")
+
+# 最初に少し待つ（受信 thread の起動待ち）
+time.sleep(1)
+
+while True:
+    # 決定されたレベルが変わったら動画を切り替える
+    if active_level != current_group_level:
+        active_level = current_group_level
+        video_path = f"{active_level}.mp4"
+        
+        if cap is not None:
+            cap.release()
+            
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"エラー: 動画ファイル {video_path} が開けません。名前を確認してください。")
+            current_group_level = 1 # 平常時に戻す
+            active_level = -1
+            continue
+        print(f"動画切替: {video_path}")
+
+    ret, frame = cap.read()
+    
+    # 動画が最後まで再生されたら最初に戻してループ再生
+    if not ret:
+        if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        continue
+
+    # --- 画面サイズのリサイズ処理 ---
+    # 元の動画の縦横比を保ったまま、指定した横幅(DISPLAY_WIDTH)に縮小する
+    h, w, c = frame.shape
+    aspect_ratio = w / h
+    display_height = int(DISPLAY_WIDTH / aspect_ratio)
+    resized_frame = cv2.resize(frame, (DISPLAY_WIDTH, display_height))
+
+    # ウィンドウに表示
+    cv2.imshow("Group Reaction Character", resized_frame)
+
+    # --- キー入力待ち（30ms）と終了・テスト処理 ---
+    key = cv2.waitKey(30) & 0xFF
+    if key == ord('q'): # 'q' で終了
+        break
+    # 0〜5キーで表情を強制変更（CoreS3からデータが届かない時のテスト用）
+    elif ord('0') <= key <= ord('5'):
+        current_group_level = int(chr(key))
+        print(f"テスト: キー入力でレベル {current_group_level} に変更しました。")
+
+if cap is not None:
+    cap.release()
+cv2.destroyAllWindows()
